@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   ingest:
-    if: startsWith(github.event.issue.title, 'run: ')
+    if: "startsWith(github.event.issue.title, 'run: ')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
