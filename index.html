@@ -3,103 +3,72 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GitHub-only login spike</title>
+<title>Prefilled-issue upload test</title>
 <style>
   body { font: 16px/1.5 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
   label { display: block; margin: .75rem 0 .25rem; font-weight: 600; }
   input { width: 100%; padding: .5rem; box-sizing: border-box; }
-  button { margin: .5rem .5rem 0 0; padding: .6rem 1rem; }
-  pre { background: #111; color: #0f0; padding: 1rem; overflow: auto; white-space: pre-wrap; min-height: 8rem; }
+  button { margin: .75rem .5rem 0 0; padding: .6rem 1rem; }
+  pre { background: #111; color: #0f0; padding: 1rem; overflow: auto; white-space: pre-wrap; }
 </style>
 </head>
 <body>
-<h1>GitHub-only login spike</h1>
-<p>Tests three things: (1) can the browser call GitHub's device-flow endpoint (CORS), (2) can it get a token, (3) can it create an issue with that token.</p>
+<h1>Prefilled-issue upload test</h1>
+<p>Simulates a fight log, compresses it, and opens a prefilled GitHub issue. Tells you how big a run can be before the link breaks.</p>
 
-<label>Client ID (from your GitHub App or OAuth App, device flow enabled)</label>
-<input id="cid" placeholder="Iv1.xxxxxxxxxxxxxxxx">
-<label>Repo for test issue (owner/name)</label>
+<label>Repo (owner/name)</label>
 <input id="repo" placeholder="you/boss-game">
-<label>Scope (OAuth App only; leave blank for a GitHub App)</label>
-<input id="scope" placeholder="public_repo">
+<label>Fight length (seconds)</label>
+<input id="secs" type="number" value="120">
+<label>Samples per second</label>
+<input id="hz" type="number" value="5">
 
-<button id="step1">1. Start device flow</button>
-<button id="step3" disabled>3. Create test issue</button>
-
+<button id="go">Build link and open issue form</button>
 <pre id="log"></pre>
 
 <script>
 const $ = id => document.getElementById(id);
 const log = (...a) => { $('log').textContent += a.join(' ') + '\n'; };
-let token = null;
 
-const form = o => new URLSearchParams(o).toString();
-
-$('step1').onclick = async () => {
-  $('log').textContent = '';
-  const client_id = $('cid').value.trim();
-  if (!client_id) return log('Enter a client ID first.');
-  try {
-    log('POST https://github.com/login/device/code ...');
-    const r = await fetch('https://github.com/login/device/code', {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: form({ client_id, scope: $('scope').value.trim() })
-    });
-    const d = await r.json();
-    log('OK, CORS works for device/code:', JSON.stringify(d));
-    if (!d.user_code) return log('No user_code returned; check client ID / device flow enabled.');
-    log(`\nGo to ${d.verification_uri} and enter code: ${d.user_code}\nWaiting for you to approve...`);
-    window.open(d.verification_uri, '_blank');
-    poll(client_id, d.device_code, (d.interval || 5) + 1, d.expires_in || 900);
-  } catch (e) {
-    log('FAILED:', e.message);
-    log('A "Failed to fetch" / CORS error here means the browser cannot call device flow directly.');
-    log('Fallback: a tiny relay for just this handshake.');
+// Fake but realistic-ish log: quantized bytes, so it compresses like a real one would.
+// Each tick: [playerX, playerY, bossX, bossY, bossAimAngle, bossActionBits, playerActionBits]
+function fakeRun(secs, hz) {
+  const n = secs * hz;
+  let px = 128, py = 128, bx = 40, by = 40, a = 0;
+  const ticks = [];
+  for (let i = 0; i < n; i++) {
+    px = Math.max(0, Math.min(255, px + Math.round((Math.random() - .5) * 20)));
+    py = Math.max(0, Math.min(255, py + Math.round((Math.random() - .5) * 20)));
+    bx += Math.sign(px - bx) * 3; by += Math.sign(py - by) * 3;
+    a = (a + Math.round((Math.random() - .3) * 16) + 256) % 256;
+    ticks.push([px, py, bx & 255, by & 255, a, Math.random() < .2 ? 1 : 0, Math.random() < .1 ? 1 : 0]);
   }
-};
-
-async function poll(client_id, device_code, interval, expires) {
-  const end = Date.now() + expires * 1000;
-  while (Date.now() < end) {
-    await new Promise(r => setTimeout(r, interval * 1000));
-    try {
-      const r = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: form({ client_id, device_code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' })
-      });
-      const d = await r.json();
-      if (d.access_token) {
-        token = d.access_token;
-        log('\nGot a token (CORS works for access_token too). Not shown for safety.');
-        $('step3').disabled = false;
-        return;
-      }
-      if (d.error === 'authorization_pending') continue;
-      if (d.error === 'slow_down') { interval += 5; continue; }
-      return log('Stopped:', JSON.stringify(d));
-    } catch (e) {
-      return log('Polling FAILED:', e.message, '(likely CORS on access_token)');
-    }
-  }
-  log('Timed out.');
+  return { v: 1, hz, outcome: 'player_won', ticks };
 }
 
-$('step3').onclick = async () => {
+async function gzipB64url(str) {
+  const stream = new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'));
+  const buf = new Uint8Array(await new Response(stream).arrayBuffer());
+  let bin = '';
+  for (const b of buf) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+$('go').onclick = async () => {
+  $('log').textContent = '';
   const repo = $('repo').value.trim();
-  if (!repo) return log('Enter owner/name first.');
-  try {
-    const r = await fetch(`https://api.github.com/repos/${repo}/issues`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
-      body: JSON.stringify({ title: 'spike: test run upload', body: JSON.stringify({ test: true, t: Date.now() }) })
-    });
-    const d = await r.json();
-    log(r.ok ? `Issue created: ${d.html_url}` : `API error ${r.status}: ${JSON.stringify(d)}`);
-  } catch (e) {
-    log('Issue creation FAILED:', e.message);
-  }
+  if (!repo) return log('Enter a repo first.');
+  const run = fakeRun(+$('secs').value, +$('hz').value);
+  const json = JSON.stringify(run);
+  const payload = await gzipB64url(json);
+  const body = '```run\n' + payload + '\n```';
+  const url = `https://github.com/${repo}/issues/new?title=${encodeURIComponent('run: ' + Date.now())}&body=${encodeURIComponent(body)}`;
+  log('raw JSON bytes:   ', json.length);
+  log('gzip+base64 chars:', payload.length);
+  log('full URL length:  ', url.length);
+  if (url.length > 7500) log('WARNING: over ~7500 chars. Likely to fail. Lower the sample rate or length.');
+  else log('Looks OK. Opening the issue form...');
+  window.open(url, '_blank');
 };
 </script>
 </body>
